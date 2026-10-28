@@ -72,7 +72,7 @@
 </div>
 
 <header>
-  <span>AI HAYATO</span>
+  <span>AI HAYATO <small id="ver" style="letter-spacing:normal;opacity:.6">v4</small></span>
   <span>
     <button id="salesBtn" type="button" title="弥生会計オンラインから書き出した仕訳CSVを読み込む">売上CSV</button>
     <button id="memBtn" type="button">記憶</button>
@@ -91,6 +91,7 @@
   </div>
   <div class="toggles">
     <button id="voiceBtn" type="button">読み上げ: ON</button>
+    <button id="ttsTest" type="button">声テスト</button>
     <button id="convBtn" type="button">常時会話モード: OFF</button>
   </div>
 </form>
@@ -291,6 +292,26 @@ voiceBtnText();
 $("voiceBtn").onclick = () => { voiceOn = !voiceOn; store.set("hayato.voice", voiceOn); voiceBtnText(); };
 
 let lastTtsError = "";
+// 声テスト: Fish Audio を1回呼んで、成功/失敗の理由を必ず画面に出す
+$("ttsTest").onclick = async () => {
+  const line = addMsg("🔈 声テスト中…");
+  try {
+    const r = await fetch("/.netlify/functions/tts", { method: "POST", headers: passHeaders(), body: JSON.stringify({ text: "音声テストです。ハヤト、接続を確認しました。" }) });
+    const type = r.headers.get("content-type") || "";
+    if (r.ok && type.includes("audio")) {
+      const blob = await r.blob();
+      line.textContent = `✅ Fish Audio 成功（${Math.round(blob.size / 1024)}KB）。再生します。聞こえなければ端末の音量・マナーモードを確認してください。`;
+      const a = new Audio(URL.createObjectURL(blob));
+      a.play().catch((e) => (line.textContent += `\n❌ 再生できません: ${e.message}`));
+    } else {
+      const body = await r.text();
+      let j = {}; try { j = JSON.parse(body); } catch {}
+      line.className = "msg err";
+      line.textContent = `❌ Fish Audio 失敗（HTTP ${r.status}）\n${j.error || body.slice(0, 200) || "応答なし"}` +
+        (j.diag ? `\nAPIキー: ${j.diag.hasKey ? "読めている" : "読めていない"} / 声ID: ${j.diag.referenceId || "読めていない"}` : "");
+    }
+  } catch (e) { line.className = "msg err"; line.textContent = "❌ 読み上げ機能に接続できません: " + e.message; }
+};
 async function speak(text) {
   if (!voiceOn || !text) return;
   setStatus("応答中…");
