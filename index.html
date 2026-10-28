@@ -290,16 +290,27 @@ const voiceBtnText = () => ($("voiceBtn").textContent = "読み上げ: " + (voic
 voiceBtnText();
 $("voiceBtn").onclick = () => { voiceOn = !voiceOn; store.set("hayato.voice", voiceOn); voiceBtnText(); };
 
+let lastTtsError = "";
 async function speak(text) {
   if (!voiceOn || !text) return;
   setStatus("応答中…");
   try {
     const r = await fetch("/.netlify/functions/tts", { method: "POST", headers: passHeaders(), body: JSON.stringify({ text }) });
-    if (!r.ok) throw new Error("tts");
+    if (!r.ok) {
+      const body = await r.text();
+      let msg; try { msg = JSON.parse(body).error; } catch {}
+      throw new Error(msg || `読み上げ機能に接続できません（HTTP ${r.status}）`);
+    }
     const url = URL.createObjectURL(await r.blob());
-    await new Promise((res) => { const a = new Audio(url); a.onended = a.onerror = res; a.play().catch(res); });
-    URL.revokeObjectURL(url);
-  } catch {
+    try {
+      await new Promise((res, rej) => {
+        const a = new Audio(url); a.onended = res;
+        a.onerror = () => rej(new Error("音声データを再生できませんでした"));
+        a.play().catch(() => rej(new Error("ブラウザが自動再生を止めました。画面を一度タップしてから話しかけてください")));
+      });
+    } finally { URL.revokeObjectURL(url); }
+  } catch (e) {
+    if (e.message !== lastTtsError) { lastTtsError = e.message; addMsg("🔈 Fish Audioの声が使えないため標準音声で読みます: " + e.message, "err"); }
     if (!("speechSynthesis" in window)) return;
     await new Promise((res) => {
       const u = new SpeechSynthesisUtterance(text); u.lang = "ja-JP"; u.rate = 1.05; u.pitch = 0.8;

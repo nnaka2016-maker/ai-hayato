@@ -24,7 +24,8 @@
 | APP_PASSCODE | 合言葉（強く推奨）。設定すると、合言葉を知っている人だけが使える |
 | CLAUDE_MODEL | 任意。既定は claude-sonnet-5-5 |
 | FISH_AUDIO_API_KEY | Fish Audio の APIキー（任意） |
-| FISH_AUDIO_REFERENCE_ID | 使う声のID（任意） |
+| FISH_AUDIO_REFERENCE_ID | 使う声のID（任意。声のページURLをそのまま貼ってもOK） |
+| FISH_AUDIO_MODEL | 任意。Fish Audio のモデル（既定 s1） |
 
 ## ローカルで試す
 ```
