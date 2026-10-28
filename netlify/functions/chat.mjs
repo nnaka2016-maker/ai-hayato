@@ -1,5 +1,5 @@
 // Claude 中継サーバー（APIキーをブラウザに出さないため）
-// 環境変数: ANTHROPIC_API_KEY（必須）, APP_PASSCODE（合言葉・強く推奨）, CLAUDE_MODEL（任意）, WEB_SEARCH（off で検索を止める）
+// 環境変数: ANTHROPIC_API_KEY（必須）, APP_PASSCODE（合言葉・強く推奨）, CLAUDE_MODEL（任意）, WEB_SEARCH（off で検索を止める）, WEB_SEARCH_MAX（1回の返答での検索回数上限。既定3）
 
 const MODEL = process.env.CLAUDE_MODEL || "claude-sonnet-5-5";
 
@@ -15,7 +15,7 @@ const PERSONA = `あなたは「ハヤト」。ユーザー専属の音声AIア�
 # 話し方のルール
 - 返答は音声で読み上げられるので、短く（基本は3文以内）。箇条書き・記号・絵文字・Markdownは使わない。
 - 分からないことは推測で断定せず、そう伝える。
-- 天気・ニュース・株価・営業時間・最新の出来事など、今の情報が必要なときは web_search で調べてから答える。調べた内容は要点だけを短く話し、「〇〇によると」のように情報源を一言添える。URLは読み上げない。
+- 天気・ニュース・株価・為替・スポーツ結果・店や施設の営業時間・制度や法律の最新情報・人物や会社の最近の動きなど、あなたの知識だけでは古いかもしれない情報や、調べものを頼まれたときは web_search で調べてから答える。数字（株価・為替など）は「何時時点」かも添える。調べた内容は要点だけを短く話し、「〇〇によると」のように情報源を一言添える。URLは読み上げない。
 - 雑談や記憶・売上データで答えられることには検索を使わない。
 
 # 特殊タグ（必要なときだけ、返答の最後に付ける。タグは読み上げられない）
@@ -44,7 +44,7 @@ export default async (req) => {
   const tools = process.env.WEB_SEARCH === "off" ? [] : [{
     type: "web_search_20260209",
     name: "web_search",
-    max_uses: 3,
+    max_uses: Math.min(Math.max(Number(process.env.WEB_SEARCH_MAX) || 3, 1), 10), // 使いすぎ防止
     user_location: { type: "approximate", country: "JP", timezone: "Asia/Tokyo" },
   }];
 
@@ -52,6 +52,7 @@ export default async (req) => {
   const convo = [...messages];
   let data;
   const searches = [];
+  const sources = new Map(); // url -> title
   for (let i = 0; i < 3; i++) {
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -68,14 +69,18 @@ export default async (req) => {
     });
     data = await res.json();
     if (!res.ok) return json({ error: data?.error?.message || "Claude API error" }, res.status);
-    for (const c of data.content || []) if (c.type === "server_tool_use" && c.name === "web_search" && c.input?.query) searches.push(c.input.query);
+    for (const c of data.content || []) {
+      if (c.type === "server_tool_use" && c.name === "web_search" && c.input?.query) searches.push(c.input.query);
+      // 返答の中で実際に引用された出典を集める
+      if (c.type === "text") for (const cit of c.citations || []) if (cit.url && !sources.has(cit.url)) sources.set(cit.url, cit.title || cit.url);
+    }
     if (data.stop_reason !== "pause_turn") break;
     convo.push({ role: "assistant", content: data.content });
   }
 
   const blocks = data.content || [];
   const text = blocks.filter((c) => c.type === "text").map((c) => c.text).join("").trim();
-  return json({ text: text || "申し訳ありません、うまくまとめられませんでした。もう一度お願いします。", searches });
+  return json({ text: text || "申し訳ありません、うまくまとめられませんでした。もう一度お願いします。", searches, sources: [...sources].slice(0, 5).map(([url, title]) => ({ url, title })) });
 };
 
 function json(obj, status = 200) {

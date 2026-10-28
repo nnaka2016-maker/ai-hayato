@@ -43,6 +43,7 @@
   .msg { padding: 10px 14px; border-radius: 10px; background: var(--panel); border: 1px solid var(--line); line-height: 1.6; white-space: pre-wrap; backdrop-filter: blur(6px); }
   .msg.me { align-self: flex-end; background: var(--me); }
   .msg.note { font-size: 12px; color: var(--dim); padding: 4px 10px; background: transparent; border: 0; }
+  .msg.note a { color: var(--accent); }
   .msg.err { border-color: #ff6b6b; color: #ffb3b3; }
   .map { width: 100%; height: 220px; border: 1px solid var(--line); border-radius: 10px; }
 
@@ -73,7 +74,7 @@
 </div>
 
 <header>
-  <span>AI HAYATO <small id="ver" style="letter-spacing:normal;opacity:.6">v5</small></span>
+  <span>AI HAYATO <small id="ver" style="letter-spacing:normal;opacity:.6">v6</small></span>
   <span>
     <button id="salesBtn" type="button" title="弥生会計オンラインから書き出した仕訳CSVを読み込む">売上CSV</button>
     <button id="memBtn" type="button">記憶</button>
@@ -148,6 +149,17 @@ function addMsg(text, cls = "") {
   const d = document.createElement("div");
   d.className = "msg " + cls; d.textContent = text;
   $("log").appendChild(d); $("log").scrollTop = 1e9; return d;
+}
+function addSources(list) {
+  const d = document.createElement("div");
+  d.className = "msg note"; d.textContent = "出典: ";
+  list.forEach((s, i) => {
+    const a = document.createElement("a");
+    a.href = s.url; a.target = "_blank"; a.rel = "noopener"; a.textContent = s.title;
+    if (i) d.append(" / ");
+    d.append(a);
+  });
+  $("log").appendChild(d); $("log").scrollTop = 1e9;
 }
 function addMap(place) {
   const f = document.createElement("iframe");
@@ -266,6 +278,7 @@ async function send(text, { hidden = false } = {}) {
     history = history.slice(-40); store.set("hayato.history", history);
     if (data.searches?.length) addMsg("🔎 Web検索: " + data.searches.join(" / "), "note");
     addMsg(reply); maps.forEach(addMap);
+    if (data.sources?.length) addSources(data.sources);
     setVisual("idle");
     await speak(reply);
   } catch (e) {
