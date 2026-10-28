@@ -11,7 +11,8 @@
 - STEP6 記憶: 覚えるべき情報を自動で保存（ブラウザに保存。右上「記憶」で確認・削除）
 - STEP7 地図: 場所の話題で Google マップを表示（APIキー不要の埋め込み）
 - STEP8 売上: 右上「売上CSV」から弥生会計オンラインの仕訳CSV（弥生インポート形式／見出し付きCSVどちらも可、Shift_JIS対応）を読み込み、勘定科目「売上高」を月別に集計してハヤトに渡す。その日はじめて開いたときはハヤトから先回りで報告
-- STEP8 カレンダー・Chatwork・タスク / STEP9 公開: これから
+- 外部情報: 天気・ニュースなど最新情報が必要なときは Claude の Web検索で調べて答える（1,000回あたり$10。`WEB_SEARCH=off` で停止）
+- STEP8 カレンダー・Chatwork・タスク: これから
 
 ## 動画ファイル（任意）
 `assets/character/` に次の4本を置くと背景がキャラクター動画になります。
@@ -23,6 +24,7 @@
 | ANTHROPIC_API_KEY | Claude の APIキー（必須） |
 | APP_PASSCODE | 合言葉（強く推奨）。設定すると、合言葉を知っている人だけが使える |
 | CLAUDE_MODEL | 任意。既定は claude-sonnet-5-5 |
+| WEB_SEARCH | 任意。`off` にするとWeb検索を使わない |
 | FISH_AUDIO_API_KEY | Fish Audio の APIキー（任意） |
 | FISH_AUDIO_REFERENCE_ID | 使う声のID（任意。声のページURLをそのまま貼ってもOK） |
 | FISH_AUDIO_MODEL | 任意。Fish Audio のモデル（既定 s1） |

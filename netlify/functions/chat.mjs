@@ -1,5 +1,5 @@
 // Claude 中継サーバー（APIキーをブラウザに出さないため）
-// 環境変数: ANTHROPIC_API_KEY（必須）, APP_PASSCODE（合言葉・強く推奨）, CLAUDE_MODEL（任意）
+// 環境変数: ANTHROPIC_API_KEY（必須）, APP_PASSCODE（合言葉・強く推奨）, CLAUDE_MODEL（任意）, WEB_SEARCH（off で検索を止める）
 
 const MODEL = process.env.CLAUDE_MODEL || "claude-sonnet-5-5";
 
@@ -15,6 +15,8 @@ const PERSONA = `あなたは「ハヤト」。ユーザー専属の音声AIア�
 # 話し方のルール
 - 返答は音声で読み上げられるので、短く（基本は3文以内）。箇条書き・記号・絵文字・Markdownは使わない。
 - 分からないことは推測で断定せず、そう伝える。
+- 天気・ニュース・株価・営業時間・最新の出来事など、今の情報が必要なときは web_search で調べてから答える。調べた内容は要点だけを短く話し、「〇〇によると」のように情報源を一言添える。URLは読み上げない。
+- 雑談や記憶・売上データで答えられることには検索を使わない。
 
 # 特殊タグ（必要なときだけ、返答の最後に付ける。タグは読み上げられない）
 - ユーザーについて今後も覚えておくべき情報（名前、好み、予定、仕事の状況、大切な人など）が会話に出たら:
@@ -38,21 +40,42 @@ export default async (req) => {
   if (typeof body.sales === "string" && body.sales) system += `\n\n# 売上データ\n${body.sales.slice(0, 4000)}\n売上の話題や報告の際は、前月比・前年同月比などを計算し、気になる変化は聞かれなくても一言添えること。`;
   if (memories.length) system += `\n\n# あなたが覚えているユーザーの情報\n${memories.map((m) => `- ${m}`).join("\n")}`;
 
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-api-key": process.env.ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
-    },
-    body: JSON.stringify({ model: MODEL, max_tokens: 1024, system, messages }),
-  });
+  // Web検索（Anthropic側で実行されるサーバーツール。1,000回あたり$10）
+  const tools = process.env.WEB_SEARCH === "off" ? [] : [{
+    type: "web_search_20260209",
+    name: "web_search",
+    max_uses: 3,
+    user_location: { type: "approximate", country: "JP", timezone: "Asia/Tokyo" },
+  }];
 
-  const data = await res.json();
-  if (!res.ok) return json({ error: data?.error?.message || "Claude API error" }, res.status);
+  // 検索が長引くと stop_reason が pause_turn になるので、続きを数回まで再開する
+  const convo = [...messages];
+  let data;
+  const searches = [];
+  for (let i = 0; i < 3; i++) {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": process.env.ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: MODEL, max_tokens: 4096, system, messages: convo,
+        output_config: { effort: "low" }, // 会話は速さ優先
+        ...(tools.length && { tools }),
+      }),
+    });
+    data = await res.json();
+    if (!res.ok) return json({ error: data?.error?.message || "Claude API error" }, res.status);
+    for (const c of data.content || []) if (c.type === "server_tool_use" && c.name === "web_search" && c.input?.query) searches.push(c.input.query);
+    if (data.stop_reason !== "pause_turn") break;
+    convo.push({ role: "assistant", content: data.content });
+  }
 
-  const text = (data.content || []).filter((c) => c.type === "text").map((c) => c.text).join("");
-  return json({ text });
+  const blocks = data.content || [];
+  const text = blocks.filter((c) => c.type === "text").map((c) => c.text).join("").trim();
+  return json({ text: text || "申し訳ありません、うまくまとめられませんでした。もう一度お願いします。", searches });
 };
 
 function json(obj, status = 200) {
