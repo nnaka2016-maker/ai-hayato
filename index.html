@@ -1,0 +1,341 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>AI HAYATO</title>
+<style>
+  :root {
+    --bg: #070b1a; --panel: rgba(10, 18, 40, .72); --line: rgba(120, 170, 255, .25);
+    --text: #dbe6ff; --dim: #7f93c0; --accent: #4fa3ff; --me: rgba(79, 163, 255, .18);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font-family: "Hiragino Sans", "Noto Sans JP", system-ui, sans-serif; overflow: hidden; }
+
+  /* STEP5: 背景動画 */
+  #stage { position: fixed; inset: 0; z-index: 0; background: radial-gradient(ellipse at center, #10224a 0%, var(--bg) 70%); }
+  #stage video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: none; }
+  #stage video.on { display: block; }
+  @media (orientation: portrait) {
+    #stage video { left: 50%; width: 290vw; transform: translateX(-50%);
+      -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 18%, #000 82%, transparent 100%);
+              mask-image: linear-gradient(to bottom, transparent 0, #000 18%, #000 82%, transparent 100%); }
+  }
+  /* 動画が無いときの代わりのコア */
+  #core { position: absolute; left: 50%; top: 38%; width: 180px; height: 180px; margin: -90px 0 0 -90px;
+    border-radius: 50%; border: 2px solid var(--accent); box-shadow: 0 0 40px var(--accent), inset 0 0 40px rgba(79,163,255,.4);
+    animation: breathe 4s ease-in-out infinite; }
+  #core::after { content: ""; position: absolute; inset: 22px; border-radius: 50%; border: 1px dashed var(--accent); animation: spin 18s linear infinite; }
+  body.searching #core { animation: breathe .8s ease-in-out infinite; }
+  body.searching #core::after { animation-duration: 2s; }
+  body.has-video #core { display: none; }
+  @keyframes breathe { 50% { transform: scale(1.06); opacity: .75; } }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  header { position: fixed; top: 0; left: 0; right: 0; z-index: 2; display: flex; justify-content: space-between; align-items: center;
+    padding: 12px 16px; font-size: 12px; letter-spacing: .3em; color: var(--dim); }
+  header button { letter-spacing: normal; }
+  #status { position: fixed; left: 0; right: 0; bottom: 168px; z-index: 2; text-align: center; font-size: 13px; color: var(--accent); letter-spacing: .15em; }
+
+  #log { position: fixed; z-index: 2; left: 50%; transform: translateX(-50%); bottom: 196px; width: min(680px, calc(100% - 32px));
+    max-height: 34vh; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+  .msg { padding: 10px 14px; border-radius: 10px; background: var(--panel); border: 1px solid var(--line); line-height: 1.6; white-space: pre-wrap; backdrop-filter: blur(6px); }
+  .msg.me { align-self: flex-end; background: var(--me); }
+  .msg.err { border-color: #ff6b6b; color: #ffb3b3; }
+  .map { width: 100%; height: 220px; border: 1px solid var(--line); border-radius: 10px; }
+
+  form { position: fixed; z-index: 2; left: 50%; transform: translateX(-50%); bottom: max(20px, env(safe-area-inset-bottom));
+    width: min(680px, calc(100% - 32px)); display: flex; flex-direction: column; gap: 8px; }
+  .row { display: flex; gap: 8px; }
+  textarea { flex: 1; resize: none; height: 52px; padding: 14px; border-radius: 10px; border: 1px solid var(--line);
+    background: var(--panel); color: var(--text); font: inherit; backdrop-filter: blur(6px); }
+  button { border: 1px solid var(--line); background: var(--panel); color: var(--text); border-radius: 10px; padding: 0 14px; font: inherit; cursor: pointer; min-height: 40px; }
+  button.primary { background: var(--accent); color: #04122b; border: 0; font-weight: 700; }
+  button.active { background: #ff5577; color: #fff; border: 0; }
+  .toggles { display: flex; gap: 8px; flex-wrap: wrap; font-size: 13px; }
+  .toggles button { min-height: 32px; font-size: 12px; }
+
+  dialog { background: #0d1630; color: var(--text); border: 1px solid var(--line); border-radius: 12px; width: min(560px, calc(100% - 32px)); }
+  dialog ul { padding-left: 18px; max-height: 50vh; overflow: auto; }
+  dialog li { margin: 6px 0; }
+  dialog li button { min-height: 24px; padding: 0 8px; margin-left: 8px; font-size: 11px; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <div id="core"></div>
+  <video id="v-idle" src="assets/character/idle-loop.mp4" muted playsinline loop preload="auto"></video>
+  <video id="v-sstart" src="assets/character/search-start.mp4" muted playsinline preload="auto"></video>
+  <video id="v-sloop" src="assets/character/search-loop.mp4" muted playsinline loop preload="auto"></video>
+  <video id="v-return" src="assets/character/return-transition.mp4" muted playsinline preload="auto"></video>
+</div>
+
+<header>
+  <span>AI HAYATO</span>
+  <span>
+    <button id="salesBtn" type="button" title="弥生会計オンラインから書き出した仕訳CSVを読み込む">売上CSV</button>
+    <button id="memBtn" type="button">記憶</button>
+  </span>
+  <input id="salesFile" type="file" accept=".csv,.txt,text/csv" hidden>
+</header>
+
+<div id="status">接続確立。待機中。</div>
+<div id="log"></div>
+
+<form id="form">
+  <div class="row">
+    <textarea id="input" placeholder="ハヤトに話しかける…"></textarea>
+    <button id="micBtn" type="button" title="音声入力">🎤</button>
+    <button class="primary" type="submit">送信</button>
+  </div>
+  <div class="toggles">
+    <button id="voiceBtn" type="button">読み上げ: ON</button>
+    <button id="convBtn" type="button">常時会話モード: OFF</button>
+  </div>
+</form>
+
+<dialog id="memDlg">
+  <h3>ハヤトが覚えていること</h3>
+  <ul id="memList"></ul>
+  <div class="row"><button id="memClear" type="button">すべて忘れさせる</button><button id="memClose" type="button">閉じる</button></div>
+</dialog>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const store = {
+  get(k, d) { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
+};
+
+/* ---------- 合言葉（公開URLを他人に使われないように） ---------- */
+const passHeaders = () => ({ "content-type": "application/json", "x-hayato-pass": store.get("hayato.pass", "") });
+function askPass() {
+  const p = prompt("合言葉を入力してください");
+  if (p !== null) store.set("hayato.pass", p.trim());
+}
+
+/* ---------- STEP5: キャラクター画面（idle / searching の状態機械） ---------- */
+const V = { idle: $("v-idle"), sstart: $("v-sstart"), sloop: $("v-sloop"), ret: $("v-return") };
+let visualState = "idle";
+let hasVideo = false;
+V.idle.addEventListener("loadeddata", () => { hasVideo = true; document.body.classList.add("has-video"); show(V.idle); }, { once: true });
+V.idle.addEventListener("error", () => {}); // 動画が無ければCSSのコアで代用
+
+function show(v) {
+  Object.values(V).forEach((x) => { if (x !== v) { x.classList.remove("on"); x.pause(); } });
+  v.classList.add("on"); v.currentTime = 0; v.play().catch(() => {});
+}
+function setVisual(state) {
+  if (state === visualState) return;
+  visualState = state;
+  document.body.classList.toggle("searching", state === "searching");
+  if (!hasVideo) return;
+  show(state === "searching" ? V.sstart : V.ret);
+}
+V.sstart.addEventListener("ended", () => { if (visualState === "searching") show(V.sloop); });
+V.ret.addEventListener("ended", () => { if (visualState === "idle") show(V.idle); });
+document.addEventListener("keydown", (e) => {
+  if (e.target.tagName === "TEXTAREA") return;
+  if (e.key === "s" || e.key === "S") setVisual("searching");
+  if (e.key === "e" || e.key === "E") setVisual("idle");
+});
+
+/* ---------- 表示 ---------- */
+function addMsg(text, cls = "") {
+  const d = document.createElement("div");
+  d.className = "msg " + cls; d.textContent = text;
+  $("log").appendChild(d); $("log").scrollTop = 1e9; return d;
+}
+function addMap(place) {
+  const f = document.createElement("iframe");
+  f.className = "map"; f.loading = "lazy"; f.referrerPolicy = "no-referrer-when-downgrade";
+  f.src = "https://maps.google.com/maps?output=embed&q=" + encodeURIComponent(place);
+  $("log").appendChild(f); $("log").scrollTop = 1e9;
+}
+const setStatus = (t) => ($("status").textContent = t);
+
+/* ---------- STEP6: 記憶 ---------- */
+let memories = store.get("hayato.memories", []);
+let history = store.get("hayato.history", []);
+function remember(m) {
+  m = m.trim(); if (!m || memories.includes(m)) return;
+  memories.push(m); memories = memories.slice(-100); store.set("hayato.memories", memories);
+}
+function renderMem() {
+  const ul = $("memList"); ul.innerHTML = "";
+  if (!memories.length) ul.innerHTML = "<li>まだ何も覚えていません。</li>";
+  memories.forEach((m, i) => {
+    const li = document.createElement("li"); li.textContent = m;
+    const b = document.createElement("button"); b.textContent = "削除";
+    b.onclick = () => { memories.splice(i, 1); store.set("hayato.memories", memories); renderMem(); };
+    li.appendChild(b); ul.appendChild(li);
+  });
+}
+$("memBtn").onclick = () => { renderMem(); $("memDlg").showModal(); };
+$("memClose").onclick = () => $("memDlg").close();
+$("memClear").onclick = () => { memories = []; history = []; store.set("hayato.memories", []); store.set("hayato.history", []); renderMem(); };
+history.filter((m) => !m.hidden).slice(-6).forEach((m) => addMsg(m.content, m.role === "user" ? "me" : ""));
+
+/* ---------- STEP8: 弥生会計オンラインの仕訳CSVから売上を集計 ---------- */
+let sales = store.get("hayato.sales", null); // { updated, months: { "2026-10": 1234567, ... } }
+$("salesBtn").onclick = () => $("salesFile").click();
+$("salesFile").onchange = async (e) => {
+  const file = e.target.files[0]; e.target.value = "";
+  if (!file) return;
+  try {
+    const months = parseYayoiSales(await decodeCsv(file));
+    if (!Object.keys(months).length) throw new Error("売上高の仕訳が見つかりませんでした。仕訳帳のCSVか確認してください。");
+    sales = { updated: new Date().toISOString().slice(0, 10), file: file.name, months };
+    store.set("hayato.sales", sales);
+    send("（売上データを読み込みました。要点と、気になる点があれば先回りして教えて）", { hidden: true });
+  } catch (err) { addMsg("売上CSVの読み込みに失敗: " + err.message, "err"); }
+};
+async function decodeCsv(file) {
+  const buf = await file.arrayBuffer();
+  const utf8 = new TextDecoder("utf-8").decode(buf);
+  return utf8.includes("\uFFFD") ? new TextDecoder("shift_jis").decode(buf) : utf8; // 弥生はShift_JISが多い
+}
+function csvRows(text) {
+  const rows = []; let row = [], cell = "", q = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (q) { if (c === '"') { if (text[i + 1] === '"') { cell += '"'; i++; } else q = false; } else cell += c; }
+    else if (c === '"') q = true;
+    else if (c === ",") { row.push(cell); cell = ""; }
+    else if (c === "\n" || c === "\r") { if (c === "\r" && text[i + 1] === "\n") i++; row.push(cell); rows.push(row); row = []; cell = ""; }
+    else cell += c;
+  }
+  if (cell || row.length) { row.push(cell); rows.push(row); }
+  return rows.map((r) => r.map((x) => x.trim()));
+}
+function parseYayoiSales(text) {
+  const rows = csvRows(text).filter((r) => r.length > 4);
+  // 見出し行があれば列名で、無ければ弥生インポート形式（取引日付=4列目, 借方科目=5, 借方金額=9, 貸方科目=11, 貸方金額=15）で読む
+  let col = { date: 3, dAcct: 4, dAmt: 8, cAcct: 10, cAmt: 14 };
+  const hi = rows.findIndex((r) => r.some((x) => x.includes("貸方勘定科目")));
+  if (hi >= 0) {
+    const h = rows[hi], f = (re) => h.findIndex((x) => re.test(x));
+    col = { date: f(/(取引)?日付/), dAcct: f(/借方勘定科目/), dAmt: f(/借方金額/), cAcct: f(/貸方勘定科目/), cAmt: f(/貸方金額/) };
+  }
+  const num = (x) => Number(String(x || "").replace(/[,¥円\s]/g, "")) || 0;
+  const months = {};
+  rows.slice(hi + 1).forEach((r) => {
+    const m = (r[col.date] || "").match(/(\d{4})[\/\-年.](\d{1,2})/);
+    if (!m) return;
+    let v = 0;
+    if (/^売上高?$/.test(r[col.cAcct])) v += num(r[col.cAmt]);
+    if (/^売上高?$/.test(r[col.dAcct])) v -= num(r[col.dAmt]); // 返品・値引き
+    if (!v) return;
+    const k = `${m[1]}-${m[2].padStart(2, "0")}`;
+    months[k] = (months[k] || 0) + v;
+  });
+  return months;
+}
+function salesSummary() {
+  if (!sales) return null;
+  const lines = Object.keys(sales.months).sort().slice(-13).map((k) => `${k}: ${sales.months[k].toLocaleString("ja-JP")}円`);
+  return `弥生会計オンラインの仕訳から集計した月別売上（${sales.updated}読込）\n${lines.join("\n")}`;
+}
+
+/* ---------- STEP2: 会話 ---------- */
+let busy = false;
+async function send(text, { hidden = false } = {}) {
+  text = text.trim(); if (!text || busy) return;
+  busy = true; stopListening();
+  if (!hidden) addMsg(text, "me");
+  history.push({ role: "user", content: text, ...(hidden && { hidden }) });
+  setVisual("searching"); setStatus("解析中…");
+  try {
+    const r = await fetch("/.netlify/functions/chat", {
+      method: "POST", headers: passHeaders(),
+      body: JSON.stringify({ messages: history.slice(-30).map(({ role, content }) => ({ role, content })), memories, sales: salesSummary() }),
+    });
+    const data = await r.json();
+    if (data.auth) { askPass(); throw new Error("合言葉を確認しました。もう一度送ってください。"); }
+    if (!r.ok) throw new Error(data.error || r.status);
+
+    let reply = data.text;
+    const maps = [];
+    reply = reply.replace(/\[\[MEMO:\s*([^\]]+)\]\]/g, (_, m) => (remember(m), ""));
+    reply = reply.replace(/\[\[MAP:\s*([^\]]+)\]\]/g, (_, p) => (maps.push(p.trim()), "")).trim();
+
+    history.push({ role: "assistant", content: reply });
+    history = history.slice(-40); store.set("hayato.history", history);
+    addMsg(reply); maps.forEach(addMap);
+    setVisual("idle");
+    await speak(reply);
+  } catch (e) {
+    history.pop();
+    addMsg("通信エラー: " + e.message, "err"); setVisual("idle");
+  } finally {
+    busy = false; setStatus("接続確立。待機中。");
+    if (convMode) startListening();
+  }
+}
+// 先回り: その日はじめて開いたとき、ハヤトから状況報告
+const today = new Date().toLocaleDateString("ja-JP");
+if (store.get("hayato.briefed", "") !== today && (sales || memories.length)) {
+  store.set("hayato.briefed", today);
+  setTimeout(() => send("（起動時ブリーフィング。今日の私に先回りして伝えるべきことを簡潔に）", { hidden: true }), 800);
+}
+$("form").onsubmit = (e) => { e.preventDefault(); const t = $("input").value; $("input").value = ""; send(t); };
+$("input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); $("form").requestSubmit(); }
+});
+
+/* ---------- STEP3: 読み上げ（Fish Audio → だめならブラウザ音声） ---------- */
+let voiceOn = store.get("hayato.voice", true);
+const voiceBtnText = () => ($("voiceBtn").textContent = "読み上げ: " + (voiceOn ? "ON" : "OFF"));
+voiceBtnText();
+$("voiceBtn").onclick = () => { voiceOn = !voiceOn; store.set("hayato.voice", voiceOn); voiceBtnText(); };
+
+async function speak(text) {
+  if (!voiceOn || !text) return;
+  setStatus("応答中…");
+  try {
+    const r = await fetch("/.netlify/functions/tts", { method: "POST", headers: passHeaders(), body: JSON.stringify({ text }) });
+    if (!r.ok) throw new Error("tts");
+    const url = URL.createObjectURL(await r.blob());
+    await new Promise((res) => { const a = new Audio(url); a.onended = a.onerror = res; a.play().catch(res); });
+    URL.revokeObjectURL(url);
+  } catch {
+    if (!("speechSynthesis" in window)) return;
+    await new Promise((res) => {
+      const u = new SpeechSynthesisUtterance(text); u.lang = "ja-JP"; u.rate = 1.05; u.pitch = 0.8;
+      u.onend = u.onerror = res; speechSynthesis.cancel(); speechSynthesis.speak(u);
+    });
+  }
+}
+
+/* ---------- STEP4: 音声認識・自動送信・常時会話モード ---------- */
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+let rec = null, listening = false, convMode = false;
+if (!SR) { $("micBtn").disabled = true; $("convBtn").disabled = true; $("micBtn").title = "このブラウザは音声認識に未対応です（Chrome推奨）"; }
+
+function startListening() {
+  if (!SR || listening || busy) return;
+  rec = new SR(); rec.lang = "ja-JP"; rec.interimResults = true; rec.continuous = false;
+  let finalText = "";
+  rec.onresult = (e) => {
+    let interim = "";
+    for (const r of e.results) r.isFinal ? (finalText = r[0].transcript) : (interim += r[0].transcript);
+    $("input").value = finalText || interim;
+  };
+  rec.onend = () => {
+    listening = false; $("micBtn").classList.remove("active");
+    if (finalText) { $("input").value = ""; send(finalText); }
+    else if (convMode && !busy) setTimeout(startListening, 300);
+    else setStatus("接続確立。待機中。");
+  };
+  rec.onerror = (e) => { if (e.error === "not-allowed") { convMode = false; convText(); addMsg("マイクの使用が許可されていません。", "err"); } };
+  listening = true; $("micBtn").classList.add("active"); setStatus("聞き取り中…");
+  rec.start();
+}
+function stopListening() { if (rec && listening) { rec.onend = () => { listening = false; $("micBtn").classList.remove("active"); }; rec.abort(); } }
+$("micBtn").onclick = () => (listening ? stopListening() : startListening());
+const convText = () => { $("convBtn").textContent = "常時会話モード: " + (convMode ? "ON" : "OFF"); $("convBtn").classList.toggle("active", convMode); };
+$("convBtn").onclick = () => { convMode = !convMode; convText(); convMode ? startListening() : stopListening(); };
+</script>
+</body>
+</html>
