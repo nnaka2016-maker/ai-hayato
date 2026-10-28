@@ -4,7 +4,7 @@
 
 ## 入っている機能（PDFのSTEP対応）
 - STEP1 人格: `netlify/functions/chat.mjs` の PERSONA
-- STEP2 会話: Netlify Functions 経由で Claude と会話（APIキーは画面に出ない）
+- STEP2 会話: Netlify Functions 経由で Claude と会話（APIキーは画面に出ない）。返答はストリーミングで表示し、1文目から先に読み上げ始める
 - STEP3 声: Fish Audio で読み上げ（未設定ならブラウザ標準の音声で代用）
 - STEP4 音声認識: 🎤ボタン、話し終わると自動送信、常時会話モード（Chrome推奨）
 - STEP5 専用画面: `assets/character/` の4本の動画で待機⇔検索を切替（S/Eキー、返答待ちの間は自動で検索中）。動画が無い間は光るコアを表示
@@ -23,7 +23,7 @@
 |---|---|
 | ANTHROPIC_API_KEY | Claude の APIキー（必須） |
 | APP_PASSCODE | 合言葉（強く推奨）。設定すると、合言葉を知っている人だけが使える |
-| CLAUDE_MODEL | 任意。既定は claude-sonnet-5-5 |
+| CLAUDE_MODEL | 任意。既定は claude-sonnet-5-5。さらに速く・安くしたいときは claude-haiku-5-5（受け答えは少し簡素になります） |
 | WEB_SEARCH | 任意。`off` にするとWeb検索を使わない |
 | WEB_SEARCH_MAX | 任意。1回の返答で検索する回数の上限（既定3、最大10） |
 | FISH_AUDIO_API_KEY | Fish Audio の APIキー（任意） |

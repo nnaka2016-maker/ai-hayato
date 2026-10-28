@@ -48,40 +48,96 @@ export default async (req) => {
     user_location: { type: "approximate", country: "JP", timezone: "Asia/Tokyo" },
   }];
 
-  // 検索が長引くと stop_reason が pause_turn になるので、続きを数回まで再開する
-  const convo = [...messages];
-  let data;
-  const searches = [];
-  const sources = new Map(); // url -> title
-  for (let i = 0; i < 3; i++) {
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-api-key": process.env.ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: MODEL, max_tokens: 4096, system, messages: convo,
-        output_config: { effort: "low" }, // 会話は速さ優先
-        ...(tools.length && { tools }),
-      }),
-    });
-    data = await res.json();
-    if (!res.ok) return json({ error: data?.error?.message || "Claude API error" }, res.status);
-    for (const c of data.content || []) {
-      if (c.type === "server_tool_use" && c.name === "web_search" && c.input?.query) searches.push(c.input.query);
-      // 返答の中で実際に引用された出典を集める
-      if (c.type === "text") for (const cit of c.citations || []) if (cit.url && !sources.has(cit.url)) sources.set(cit.url, cit.title || cit.url);
-    }
-    if (data.stop_reason !== "pause_turn") break;
-    convo.push({ role: "assistant", content: data.content });
+  // 返答はストリーミングで返す（1行1イベントのJSON）。画面は届いた文から表示・読み上げを始める
+  //   {"t":"text","v":"..."} / {"t":"search","q":"..."} / {"t":"sources","v":[...]} / {"t":"error","v":"..."} / {"t":"done"}
+  const enc = new TextEncoder();
+  const stream = new ReadableStream({
+    async start(ctrl) {
+      const send = (o) => ctrl.enqueue(enc.encode(JSON.stringify(o) + "\n"));
+      const sources = new Map(); // url -> title
+      const convo = [...messages];
+      try {
+        // 検索が長引くと stop_reason が pause_turn になるので、続きを数回まで再開する
+        for (let i = 0; i < 3; i++) {
+          const { blocks, stopReason } = await callClaude(system, convo, tools, send, sources);
+          if (stopReason !== "pause_turn") break;
+          convo.push({ role: "assistant", content: blocks });
+        }
+        if (sources.size) send({ t: "sources", v: [...sources].slice(0, 5).map(([url, title]) => ({ url, title })) });
+      } catch (e) {
+        send({ t: "error", v: e.message });
+      }
+      send({ t: "done" });
+      ctrl.close();
+    },
+  });
+  return new Response(stream, { headers: { "content-type": "application/x-ndjson", "cache-control": "no-cache" } });
+};
+
+async function callClaude(system, messages, tools, send, sources) {
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": process.env.ANTHROPIC_API_KEY,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model: MODEL, max_tokens: 2048, system, messages, stream: true,
+      output_config: { effort: "low" }, // 会話は速さ優先
+      // Sonnet 5.5 は between_tools で「考える時間」を省いて最初の一言を早くする
+      ...(MODEL === "claude-sonnet-5-5" && { thinking: { type: "between_tools" } }),
+      ...(tools.length && { tools }),
+    }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err?.error?.message || `Claude API error (${res.status})`);
   }
 
-  const blocks = data.content || [];
-  const text = blocks.filter((c) => c.type === "text").map((c) => c.text).join("").trim();
-  return json({ text: text || "申し訳ありません、うまくまとめられませんでした。もう一度お願いします。", searches, sources: [...sources].slice(0, 5).map(([url, title]) => ({ url, title })) });
-};
+  // SSE を読みながら、pause_turn で送り返せるよう content ブロックも組み立てる
+  const blocks = [];
+  const partial = {};
+  let stopReason = null;
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let nl;
+    while ((nl = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (!line.startsWith("data:")) continue;
+      const ev = JSON.parse(line.slice(5));
+      if (ev.type === "content_block_start") {
+        blocks[ev.index] = structuredClone(ev.content_block);
+        partial[ev.index] = "";
+      } else if (ev.type === "content_block_delta") {
+        const b = blocks[ev.index], d = ev.delta;
+        if (d.type === "text_delta") { b.text += d.text; send({ t: "text", v: d.text }); }
+        else if (d.type === "input_json_delta") partial[ev.index] += d.partial_json;
+        else if (d.type === "citations_delta") {
+          (b.citations ||= []).push(d.citation);
+          if (d.citation.url && !sources.has(d.citation.url)) sources.set(d.citation.url, d.citation.title || d.citation.url);
+        }
+        else if (d.type === "thinking_delta") b.thinking += d.thinking;
+        else if (d.type === "signature_delta") b.signature = d.signature;
+      } else if (ev.type === "content_block_stop") {
+        const b = blocks[ev.index];
+        if (partial[ev.index]) { try { b.input = JSON.parse(partial[ev.index]); } catch {} }
+        if (b.type === "server_tool_use" && b.name === "web_search" && b.input?.query) send({ t: "search", q: b.input.query });
+      } else if (ev.type === "message_delta") {
+        stopReason = ev.delta?.stop_reason ?? stopReason;
+      } else if (ev.type === "error") {
+        throw new Error(ev.error?.message || "Claude API error");
+      }
+    }
+  }
+  return { blocks: blocks.filter(Boolean), stopReason };
+}
 
 function json(obj, status = 200) {
   return new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json" } });

@@ -74,7 +74,7 @@
 </div>
 
 <header>
-  <span>AI HAYATO <small id="ver" style="letter-spacing:normal;opacity:.6">v6</small></span>
+  <span>AI HAYATO <small id="ver" style="letter-spacing:normal;opacity:.6">v7</small></span>
   <span>
     <button id="salesBtn" type="button" title="弥生会計オンラインから書き出した仕訳CSVを読み込む">売上CSV</button>
     <button id="memBtn" type="button">記憶</button>
@@ -252,35 +252,74 @@ function salesSummary() {
   return `弥生会計オンラインの仕訳から集計した月別売上（${sales.updated}読込）\n${lines.join("\n")}`;
 }
 
-/* ---------- STEP2: 会話 ---------- */
+/* ---------- STEP2: 会話（ストリーミング。届いた文から表示・読み上げ） ---------- */
 let busy = false;
+const TAG = /\[\[(MEMO|MAP):\s*([^\]]+)\]\]/g;
+const visible = (raw) => raw.replace(TAG, "").replace(/\[\[[^\]]*$/, ""); // 書きかけのタグも隠す
+
 async function send(text, { hidden = false } = {}) {
   text = text.trim(); if (!text || busy) return;
   busy = true; stopListening();
   if (!hidden) addMsg(text, "me");
   history.push({ role: "user", content: text, ...(hidden && { hidden }) });
-  setVisual("searching"); setStatus("解析中…（必要ならWeb検索します）");
+  setVisual("searching"); setStatus("解析中…");
+  let raw = "", spoken = 0, bubble = null;
   try {
     const r = await fetch("/.netlify/functions/chat", {
       method: "POST", headers: passHeaders(),
       body: JSON.stringify({ messages: history.slice(-30).map(({ role, content }) => ({ role, content })), memories, sales: salesSummary() }),
     });
-    const data = await r.json().catch(() => ({ error: r.status === 502 || r.status === 504 ? "時間切れです（検索に時間がかかりました）。もう一度試してください" : `HTTP ${r.status}` }));
-    if (data.auth) { askPass(); throw new Error("合言葉を確認しました。もう一度送ってください。"); }
-    if (!r.ok) throw new Error(data.error || r.status);
+    if (!r.ok || !r.body) {
+      const data = await r.json().catch(() => ({ error: r.status === 502 || r.status === 504 ? "時間切れです。もう一度試してください" : `HTTP ${r.status}` }));
+      if (data.auth) { askPass(); throw new Error("合言葉を確認しました。もう一度送ってください。"); }
+      throw new Error(data.error || r.status);
+    }
 
-    let reply = data.text;
+    // 文の区切りまで届いたら、その文を読み上げキューへ
+    const flushSentences = (final) => {
+      const v = visible(raw);
+      let rest = v.slice(spoken), m;
+      while ((m = rest.match(/^[\s\S]*?[。！？!?\n]/) || (rest.length > 80 && rest.match(/^[\s\S]{20,}、/)))) {
+        enqueueSpeech(m[0]); spoken += m[0].length; rest = rest.slice(m[0].length);
+      }
+      if (final && rest.trim()) { enqueueSpeech(rest); spoken += rest.length; }
+    };
+
+    const reader = r.body.getReader(), dec = new TextDecoder();
+    let buf = "", streamError = null;
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
+        if (!line.trim()) continue;
+        const ev = JSON.parse(line);
+        if (ev.t === "search") { setStatus("Web検索中…"); addMsg("🔎 Web検索: " + ev.q, "note"); }
+        else if (ev.t === "text") {
+          raw += ev.v;
+          if (!bubble) { bubble = addMsg(""); setVisual("idle"); }
+          bubble.textContent = visible(raw).trimStart(); $("log").scrollTop = 1e9;
+          flushSentences(false);
+        }
+        else if (ev.t === "sources") addSources(ev.v);
+        else if (ev.t === "error") streamError = ev.v;
+      }
+    }
+    if (streamError && !raw) throw new Error(streamError);
+    flushSentences(true);
+
     const maps = [];
-    reply = reply.replace(/\[\[MEMO:\s*([^\]]+)\]\]/g, (_, m) => (remember(m), ""));
-    reply = reply.replace(/\[\[MAP:\s*([^\]]+)\]\]/g, (_, p) => (maps.push(p.trim()), "")).trim();
-
+    const reply = raw.replace(TAG, (_, kind, v) => (kind === "MEMO" ? remember(v) : maps.push(v.trim()), "")).trim()
+      || "申し訳ありません、うまくまとめられませんでした。もう一度お願いします。";
+    if (!bubble) bubble = addMsg(reply);
+    bubble.textContent = reply;
+    maps.forEach(addMap);
     history.push({ role: "assistant", content: reply });
     history = history.slice(-40); store.set("hayato.history", history);
-    if (data.searches?.length) addMsg("🔎 Web検索: " + data.searches.join(" / "), "note");
-    addMsg(reply); maps.forEach(addMap);
-    if (data.sources?.length) addSources(data.sources);
     setVisual("idle");
-    await speak(reply);
+    await speechChain;
   } catch (e) {
     history.pop();
     addMsg("通信エラー: " + e.message, "err"); setVisual("idle");
@@ -327,32 +366,44 @@ $("ttsTest").onclick = async () => {
     }
   } catch (e) { line.className = "msg err"; line.textContent = "❌ 読み上げ機能に接続できません: " + e.message; }
 };
-async function speak(text) {
-  if (!voiceOn || !text) return;
-  setStatus("応答中…");
+// 読み上げキュー: 文ごとに音声を前もって取りに行き（取得は1本ずつ順番）、届いた順に再生
+let speechChain = Promise.resolve(), fetchChain = Promise.resolve();
+function enqueueSpeech(sentence) {
+  sentence = sentence.trim();
+  if (!voiceOn || !sentence) return;
+  const audio = (fetchChain = fetchChain.then(() => fetchTts(sentence)));
+  speechChain = speechChain.then(() => playSentence(sentence, audio));
+}
+async function fetchTts(text) {
   try {
     const r = await fetch("/.netlify/functions/tts", { method: "POST", headers: passHeaders(), body: JSON.stringify({ text }) });
     if (!r.ok) {
       const body = await r.text();
       let msg; try { msg = JSON.parse(body).error; } catch {}
-      throw new Error(msg || `読み上げ機能に接続できません（HTTP ${r.status}）`);
+      return { error: msg || `読み上げ機能に接続できません（HTTP ${r.status}）` };
     }
-    const url = URL.createObjectURL(await r.blob());
+    return { url: URL.createObjectURL(await r.blob()) };
+  } catch (e) { return { error: e.message }; }
+}
+async function playSentence(text, audio) {
+  setStatus("応答中…");
+  let { url, error } = await audio;
+  if (url) {
     try {
       await new Promise((res, rej) => {
         const a = new Audio(url); a.onended = res;
         a.onerror = () => rej(new Error("音声データを再生できませんでした"));
         a.play().catch(() => rej(new Error("ブラウザが自動再生を止めました。画面を一度タップしてから話しかけてください")));
       });
-    } finally { URL.revokeObjectURL(url); }
-  } catch (e) {
-    if (e.message !== lastTtsError) { lastTtsError = e.message; addMsg("🔈 Fish Audioの声が使えないため標準音声で読みます: " + e.message, "err"); }
-    if (!("speechSynthesis" in window)) return;
-    await new Promise((res) => {
-      const u = new SpeechSynthesisUtterance(text); u.lang = "ja-JP"; u.rate = 1.05; u.pitch = 0.8;
-      u.onend = u.onerror = res; speechSynthesis.cancel(); speechSynthesis.speak(u);
-    });
+      return;
+    } catch (e) { error = e.message; } finally { URL.revokeObjectURL(url); }
   }
+  if (error !== lastTtsError) { lastTtsError = error; addMsg("🔈 Fish Audioの声が使えないため標準音声で読みます: " + error, "err"); }
+  if (!("speechSynthesis" in window)) return;
+  await new Promise((res) => {
+    const u = new SpeechSynthesisUtterance(text); u.lang = "ja-JP"; u.rate = 1.05; u.pitch = 0.8;
+    u.onend = u.onerror = res; speechSynthesis.speak(u);
+  });
 }
 
 /* ---------- STEP4: 音声認識・自動送信・常時会話モード ---------- */
