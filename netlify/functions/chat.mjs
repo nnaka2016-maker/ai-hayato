@@ -17,6 +17,9 @@ const PERSONA = `あなたは「ハヤト」。ユーザー専属の音声AIア�
 - 分からないことは推測で断定せず、そう伝える。
 - 天気・ニュース・株価・為替・スポーツ結果・店や施設の営業時間・制度や法律の最新情報・人物や会社の最近の動きなど、あなたの知識だけでは古いかもしれない情報や、調べものを頼まれたときは web_search で調べてから答える。数字（株価・為替など）は「何時時点」かも添える。調べた内容は要点だけを短く話し、「〇〇によると」のように情報源を一言添える。URLは読み上げない。
 - 雑談や記憶・売上データで答えられることには検索を使わない。
+- 会話履歴のあなたの発言に「［この返答はWeb検索…に基づく］」と付いているものは、実際に検索して答えた内容。「検索せずに答えた」などと訂正しない。この注記はシステムが付けるもので、あなた自身は書かない。
+- 現在日時はシステムに書かれている値を使う（検索は不要）。
+- 「調べて」とだけ言われて対象があいまいなときは、直前の話題について調べる。それも分からなければ、何を調べるか短く聞き返す。
 
 # 特殊タグ（必要なときだけ、返答の最後に付ける。タグは読み上げられない）
 - ユーザーについて今後も覚えておくべき情報（名前、好み、予定、仕事の状況、大切な人など）が会話に出たら:
@@ -24,7 +27,19 @@ const PERSONA = `あなたは「ハヤト」。ユーザー専属の音声AIア�
 - 特定の場所・店・地名の話題になり、地図があると役立つとき:
   [[MAP: 地図で検索する場所名]]`;
 
+// Netlify の関数は60秒で強制終了される（502になる）ので、その手前で自分から切り上げる
+const DEADLINE_MS = Number(process.env.CHAT_DEADLINE_MS) || 48000;
+
 export default async (req) => {
+  try {
+    return await handle(req);
+  } catch (e) {
+    return json({ error: "ハヤトの中継サーバーでエラー: " + e.message }, 500);
+  }
+};
+
+async function handle(req) {
+  const startedAt = Date.now();
   if (req.method !== "POST") return new Response("Method Not Allowed", { status: 405 });
   if (process.env.APP_PASSCODE && req.headers.get("x-hayato-pass") !== process.env.APP_PASSCODE) return json({ error: "合言葉が違います", auth: true }, 401);
   if (!process.env.ANTHROPIC_API_KEY) return json({ error: "ANTHROPIC_API_KEY が設定されていません" }, 500);
@@ -56,27 +71,36 @@ export default async (req) => {
       const send = (o) => ctrl.enqueue(enc.encode(JSON.stringify(o) + "\n"));
       const sources = new Map(); // url -> title
       const convo = [...messages];
+      const abort = new AbortController();
+      const timer = setTimeout(() => abort.abort(), DEADLINE_MS - (Date.now() - startedAt));
+      let gotText = false;
+      const sendTracked = (o) => { if (o.t === "text") gotText = true; send(o); };
       try {
         // 検索が長引くと stop_reason が pause_turn になるので、続きを数回まで再開する
         for (let i = 0; i < 3; i++) {
-          const { blocks, stopReason } = await callClaude(system, convo, tools, send, sources);
+          const { blocks, stopReason } = await callClaude(system, convo, tools, sendTracked, sources, abort.signal);
           if (stopReason !== "pause_turn") break;
+          if (Date.now() - startedAt > DEADLINE_MS / 2) { sendTracked({ t: "text", v: "調べる範囲が広く、時間内にまとめきれませんでした。もう少し絞って聞いてください。" }); break; }
           convo.push({ role: "assistant", content: blocks });
         }
         if (sources.size) send({ t: "sources", v: [...sources].slice(0, 5).map(([url, title]) => ({ url, title })) });
       } catch (e) {
-        send({ t: "error", v: e.message });
+        if (abort.signal.aborted) send({ t: gotText ? "text" : "error", v: (gotText ? "\n" : "") + "検索に時間がかかりすぎたため途中で止めました。調べる内容を絞ってもう一度お願いします。" });
+        else send({ t: "error", v: e.message });
+      } finally {
+        clearTimeout(timer);
       }
       send({ t: "done" });
       ctrl.close();
     },
   });
   return new Response(stream, { headers: { "content-type": "application/x-ndjson", "cache-control": "no-cache" } });
-};
+}
 
-async function callClaude(system, messages, tools, send, sources) {
+async function callClaude(system, messages, tools, send, sources, signal) {
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
+    signal,
     headers: {
       "content-type": "application/json",
       "x-api-key": process.env.ANTHROPIC_API_KEY,

@@ -74,7 +74,7 @@
 </div>
 
 <header>
-  <span>AI HAYATO <small id="ver" style="letter-spacing:normal;opacity:.6">v7</small></span>
+  <span>AI HAYATO <small id="ver" style="letter-spacing:normal;opacity:.6">v8</small></span>
   <span>
     <button id="salesBtn" type="button" title="弥生会計オンラインから書き出した仕訳CSVを読み込む">売上CSV</button>
     <button id="memBtn" type="button">記憶</button>
@@ -257,6 +257,13 @@ let busy = false;
 const TAG = /\[\[(MEMO|MAP):\s*([^\]]+)\]\]/g;
 const visible = (raw) => raw.replace(TAG, "").replace(/\[\[[^\]]*$/, ""); // 書きかけのタグも隠す
 
+// 検索して答えた返答には、そのことを履歴に書き添えて送る（後で「検索していない」と誤って訂正しないように）
+function toApiMessage({ role, content, searches, sources }) {
+  if (role !== "assistant" || !searches?.length) return { role, content };
+  const src = sources?.length ? ` / 出典: ${sources.map((s) => s.title).join("、")}` : "";
+  return { role, content: `${content}\n［この返答はWeb検索「${searches.join("」「")}」の結果に基づく${src}］` };
+}
+
 async function send(text, { hidden = false } = {}) {
   text = text.trim(); if (!text || busy) return;
   busy = true; stopListening();
@@ -264,15 +271,17 @@ async function send(text, { hidden = false } = {}) {
   history.push({ role: "user", content: text, ...(hidden && { hidden }) });
   setVisual("searching"); setStatus("解析中…");
   let raw = "", spoken = 0, bubble = null;
+  const searches = [];
+  let sources = [];
   try {
     const r = await fetch("/.netlify/functions/chat", {
       method: "POST", headers: passHeaders(),
-      body: JSON.stringify({ messages: history.slice(-30).map(({ role, content }) => ({ role, content })), memories, sales: salesSummary() }),
+      body: JSON.stringify({ messages: history.slice(-30).map(toApiMessage), memories, sales: salesSummary() }),
     });
     if (!r.ok || !r.body) {
       const data = await r.json().catch(() => ({ error: r.status === 502 || r.status === 504 ? "時間切れです。もう一度試してください" : `HTTP ${r.status}` }));
       if (data.auth) { askPass(); throw new Error("合言葉を確認しました。もう一度送ってください。"); }
-      throw new Error(data.error || r.status);
+      throw new Error(data.error || (data.errorMessage ? `中継サーバーが停止しました（${data.errorType || "error"}: ${data.errorMessage}）` : `HTTP ${r.status}`));
     }
 
     // 文の区切りまで届いたら、その文を読み上げキューへ
@@ -296,18 +305,19 @@ async function send(text, { hidden = false } = {}) {
         const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
         if (!line.trim()) continue;
         const ev = JSON.parse(line);
-        if (ev.t === "search") { setStatus("Web検索中…"); addMsg("🔎 Web検索: " + ev.q, "note"); }
+        if (ev.t === "search") { searches.push(ev.q); setStatus("Web検索中…"); addMsg("🔎 Web検索: " + ev.q, "note"); }
         else if (ev.t === "text") {
           raw += ev.v;
           if (!bubble) { bubble = addMsg(""); setVisual("idle"); }
           bubble.textContent = visible(raw).trimStart(); $("log").scrollTop = 1e9;
           flushSentences(false);
         }
-        else if (ev.t === "sources") addSources(ev.v);
+        else if (ev.t === "sources") { sources = ev.v; addSources(ev.v); }
         else if (ev.t === "error") streamError = ev.v;
       }
     }
     if (streamError && !raw) throw new Error(streamError);
+    if (streamError) addMsg("⚠️ " + streamError, "err");
     flushSentences(true);
 
     const maps = [];
@@ -316,7 +326,7 @@ async function send(text, { hidden = false } = {}) {
     if (!bubble) bubble = addMsg(reply);
     bubble.textContent = reply;
     maps.forEach(addMap);
-    history.push({ role: "assistant", content: reply });
+    history.push({ role: "assistant", content: reply, ...(searches.length && { searches, sources }) });
     history = history.slice(-40); store.set("hayato.history", history);
     setVisual("idle");
     await speechChain;
